@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrobotoolkit_teleop"
+version = "1.0.3"
+description = "Quest 3 pose acquisition and Placo IK utilities for a single Piper arm"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Zhigen", email = "zhaozhigen@gmail.com"}
+]
+dependencies = [
+    "meshcat>=0.3,<0.4",
+    "numpy>=2.2,<2.3",
+    "placo==0.10.1",
+    "xrobotoolkit-sdk==1.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+]
+
+[project.scripts]
+quest3-monitor = "xrobotoolkit_teleop.cli.quest3_monitor:main"
+
+[tool.setuptools.packages.find]
+include = ["xrobotoolkit_teleop*"]
+
+[tool.setuptools.package-data]
+xrobotoolkit_teleop = ["../assets/**/*"]
+
+[tool.black]
+line-length = 120
