@@ -18,6 +18,15 @@ class PiperIKSolverTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(angles)))
         self.assertTrue(self.ik.joint_limits_valid(angles))
 
+    def test_set_joint_angles_synchronizes_solver_state(self):
+        commanded = np.array([0.1, 1.0, -1.0, 0.2, 0.1, -0.2])
+
+        self.ik.set_joint_angles(commanded)
+
+        np.testing.assert_allclose(self.ik.joint_angles_rad, commanded)
+        with self.assertRaisesRegex(ValueError, "Commanded joint angles"):
+            self.ik.set_joint_angles(np.zeros(5))
+
     def test_measured_initial_state_allows_only_configured_small_limit_deviation(self):
         measured = np.array([-0.08, -0.004, -0.16, -0.10, 0.29, 0.10])
 

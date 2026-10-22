@@ -188,6 +188,15 @@ class PiperIKSolver:
         )
         return _transform_to_pose(transform)
 
+    def set_joint_angles(self, joint_angles_rad: np.ndarray) -> None:
+        """Synchronize the continuous solver state to a validated commanded state."""
+        joint_angles_rad = np.asarray(joint_angles_rad, dtype=np.float64)
+        if not self.joint_limits_valid(joint_angles_rad):
+            raise ValueError(
+                "Commanded joint angles must have shape (6,), be finite, and satisfy limits"
+            )
+        set_piper_joint_positions(self.robot, joint_angles_rad)
+
     def forward_kinematics(self, joint_angles_rad: np.ndarray | None = None) -> CartesianPose:
         """Return link6 pose; restore the continuous solver state after probes."""
         if joint_angles_rad is None:

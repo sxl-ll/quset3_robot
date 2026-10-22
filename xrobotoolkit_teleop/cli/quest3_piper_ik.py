@@ -49,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
             "verify the SDK position unit on the target setup first)."
         ),
     )
+    parser.add_argument(
+        "--orientation-scale",
+        type=float,
+        default=0.3,
+        help=(
+            "Multiplier for right-controller rotation deltas (default: 0.3; "
+            "use 0 to lock the end-effector orientation)."
+        ),
+    )
     parser.add_argument("--smoothing-alpha", type=float, default=0.25)
     parser.add_argument("--grip-threshold", type=float, default=0.9)
     parser.add_argument(
@@ -81,6 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--command-subscriber-timeout-s", type=float, default=5.0)
     parser.add_argument("--max-command-joint-step-rad", type=float, default=0.05)
     parser.add_argument("--max-command-joint-speed-rad-s", type=float, default=0.5)
+    parser.add_argument("--max-command-joint-acceleration-rad-s2", type=float, default=2.0)
+    parser.add_argument(
+        "--driver-speed-percent",
+        type=float,
+        default=20.0,
+        help="Piper driver speed percentage encoded in JointState.velocity[6] (default: 20).",
+    )
     return parser
 
 
@@ -93,6 +109,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--stale-timeout-s must be positive")
     if args.position_scale <= 0:
         parser.error("--position-scale must be positive")
+    if not np.isfinite(args.orientation_scale) or not 0 <= args.orientation_scale <= 1:
+        parser.error("--orientation-scale must be in [0, 1]")
     if not 0 < args.smoothing_alpha <= 1:
         parser.error("--smoothing-alpha must be in (0, 1]")
     if not 0 <= args.grip_threshold <= 1:
@@ -123,6 +141,13 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         or args.max_command_joint_speed_rad_s <= 0
     ):
         parser.error("--max-command-joint-speed-rad-s must be positive")
+    if (
+        not np.isfinite(args.max_command_joint_acceleration_rad_s2)
+        or args.max_command_joint_acceleration_rad_s2 <= 0
+    ):
+        parser.error("--max-command-joint-acceleration-rad-s2 must be positive")
+    if not np.isfinite(args.driver_speed_percent) or not 1 <= args.driver_speed_percent <= 100:
+        parser.error("--driver-speed-percent must be in [1, 100]")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -146,6 +171,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         pipeline = Quest3PiperPipeline.create(
             position_scale=args.position_scale,
+            orientation_scale=args.orientation_scale,
             smoothing_alpha=args.smoothing_alpha,
             grip_threshold=args.grip_threshold,
             initial_joint_angles_rad=initial_joint_angles_rad,
@@ -175,6 +201,10 @@ def run(args: argparse.Namespace) -> int:
                 gripper_position_m=initial_joint_sample.gripper_position_m,
                 max_joint_step_rad=args.max_command_joint_step_rad,
                 max_joint_speed_rad_s=args.max_command_joint_speed_rad_s,
+                max_joint_acceleration_rad_s2=(
+                    args.max_command_joint_acceleration_rad_s2
+                ),
+                driver_speed_percent=args.driver_speed_percent,
                 subscriber_timeout_s=args.command_subscriber_timeout_s,
             )
         except (Ros2JointCommandError, JointCommandRejected, ValueError) as exc:
@@ -224,25 +254,44 @@ def run(args: argparse.Namespace) -> int:
         print(
             f"  max_joint_step={args.max_command_joint_step_rad:g} rad "
             f"max_joint_speed={args.max_command_joint_speed_rad_s:g} rad/s "
+            f"max_joint_acceleration={args.max_command_joint_acceleration_rad_s2:g} rad/s^2 "
+            f"driver_speed={command_publisher.driver_speed_percent:g}% "
             f"held_gripper={command_publisher.gripper_position_m:g} m"
         )
     print("Right Grip activates the clutch; release Grip to hold the target.")
     print(
-        f"position_scale={args.position_scale:g}; verify the XR position unit and axis "
-        "directions on the target Quest 3 setup before interpreting motion."
+        f"position_scale={args.position_scale:g} orientation_scale={args.orientation_scale:g}; "
+        "verify the XR position unit and axis directions on the target Quest 3 setup."
     )
     print()
 
     period_s = 1.0 / args.rate_hz
+    command_target_was_active = False
+
+    def fmt_ms(value: float | None) -> str:
+        return f"{value:.3f} ms" if value is not None else "N/A"
+
     try:
         with XrClient() as xr_client:
             reader = Quest3Reader(xr_client, stale_timeout_s=args.stale_timeout_s)
             started_at = time.monotonic()
             while args.duration_s is None or time.monotonic() - started_at < args.duration_s:
                 cycle_started_at = time.monotonic()
+                read_ms = None
+                process_ms = None
+                publish_ms = None
+                command_latency_ms = None
                 try:
+                    # 1. XR 数据读取耗时
+                    t0 = time.perf_counter()
                     snapshot = reader.read()
+                    t1 = time.perf_counter()
+                    read_ms = (t1 - t0) * 1000
                     result = pipeline.process(snapshot)
+                    t2 = time.perf_counter()
+                    process_ms = (t2 - t1) * 1000
+                    publish_ms = 0.0
+                    command_latency_ms = 0.0
                     print(format_pipeline_result(result), flush=True)
                     if (
                         command_publisher is not None
@@ -251,15 +300,72 @@ def run(args: argparse.Namespace) -> int:
                         and result.ik.joint_limits_valid
                         and result.ik.joint_angles_rad is not None
                     ):
-                        command_publisher.publish(result.ik.joint_angles_rad)
+                        command_plan = command_publisher.publish(result.ik.joint_angles_rad)
+                        pipeline.synchronize_commanded_joint_angles(
+                            command_plan.command_joint_angles_rad,
+                            hold_mapping_target=False,
+                        )
+                        command_target_was_active = True
+                        t4 = time.perf_counter()
+                        publish_ms = (t4 - t2) * 1000
+                        # 从开始读取 XR 到发布函数返回
+                        command_latency_ms = (
+                            t4 - cycle_started_at
+                        ) * 1000
+
                         print(
-                            f"  joint_command=PUBLISHED topic={command_publisher.topic}",
+                            f"  joint_command=PUBLISHED topic={command_publisher.topic} "
+                            f"trajectory={'RATE_LIMITED' if command_plan.rate_limited else 'TARGET_REACHED'} "
+                            f"tracking_error_rad={command_plan.largest_tracking_error_rad:.6f}",
+                            flush=True,
+                        )
+                        if command_plan.rate_limited:
+                            command_values = ", ".join(
+                                f"{value:+.6f}"
+                                for value in command_plan.command_joint_angles_rad
+                            )
+                            print(
+                                f"  command_joint_angles_rad=({command_values})",
+                                flush=True,
+                            )
+                    elif (
+                        command_publisher is not None
+                        and command_target_was_active
+                        and (
+                            result.mapping.reason
+                            in {
+                                "tracking_invalid",
+                                "grip_invalid",
+                                "clutch_inactive",
+                                "controller_pose_invalid",
+                            }
+                            or (result.ik is not None and not result.ik.success)
+                        )
+                    ):
+                        command_publisher.hold()
+                        pipeline.synchronize_commanded_joint_angles(
+                            command_publisher.last_command_joint_angles_rad,
+                            hold_mapping_target=True,
+                        )
+                        command_target_was_active = False
+                        print(
+                            "  joint_command=HOLD synchronized_to_last_published_command",
                             flush=True,
                         )
                 except Quest3ReadError as exc:
                     print(f"XR read error: {exc}", file=sys.stderr, flush=True)
+                print(
+                    f"\n{'=' * 65}\n"
+                    f"  XR read          : {fmt_ms(read_ms)}\n"
+                    f"  Pipeline + IK    : {fmt_ms(process_ms)}\n"
+                    f"  ROS publish      : {fmt_ms(publish_ms)}\n"
+                    f"  Command latency  : {fmt_ms(command_latency_ms)}\n",
+                    end="",
+                    flush=True,
+                )
 
                 sleep_s = period_s - (time.monotonic() - cycle_started_at)
+
                 if sleep_s > 0:
                     time.sleep(sleep_s)
     except JointCommandRejected as exc:

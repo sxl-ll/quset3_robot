@@ -89,22 +89,33 @@ python -m xrobotoolkit_teleop.cli.quest3_piper_ik \
   --command-subscriber-timeout-s 5 \
   --max-command-joint-step-rad 0.05 \
   --max-command-joint-speed-rad-s 0.5 \
-  --rate-hz 20 \
-  --position-scale 0.1
+  --max-command-joint-acceleration-rad-s2 2.0 \
+  --driver-speed-percent 20 \
+  --rate-hz 50 \
+  --position-scale 1.0 \
+  --orientation-scale 0.3
 ```
 
 发布消息仍为 `sensor_msgs/msg/JointState`：`joint0…joint5` 写入经过 IK 成功、
 FK 误差和 URDF 限位验证的六个关节角（弧度），`joint6` 保持启动反馈中的夹爪
 位置（米）。程序仅在 Grip 激活并生成新目标且 IK 验证成功时发布；跟踪失效、
-IK 失败时不发布；跳变量或速度保护超限时拒绝该帧并立即停止程序，要求重新读取
-真机状态后再启动。发布前还会确认控制话题确实存在订阅者。
+IK 失败时不发布。正常的速度或加速度超限不会再终止程序，而是把 IK 目标拆成
+受限的连续中间关节命令；只有相邻 IK 解本身超过硬单步阈值时才停止。Grip 松开
+或跟踪失效时，映射目标会同步到最后发布的关节状态，避免继续追赶旧目标。
+发布前还会确认控制话题确实存在订阅者。
 
-程序不会发布 `/enable_flag`，因此不会自动使能机械臂。`0.05 rad` 单步限制和
-`0.5 rad/s` 变化率限制是本程序的额外软件保护参数，不代表驱动器自身的速度、
-加速度或安全额定值；首次真机联调仍应使用更小的位置缩放并遵循机器人厂商要求。
+程序不会发布 `/enable_flag`，因此不会自动使能机械臂。`0.05 rad` 是相邻 IK 解的
+硬跳变阈值；`0.5 rad/s` 和 `2.0 rad/s²` 用于生成平滑命令。这些是本程序的额外
+软件保护参数，不代表驱动器自身的速度、加速度或安全额定值。
+`--driver-speed-percent 20` 会写入 Piper 驱动约定的 `JointState.velocity[6]`；不再
+发送全零 velocity，从而避免驱动回退到 100% 速度比例。
 
 `--position-scale` 同时决定 XR 位移到机器人米制位移的换算和运动缩放；
-在 Quest 3 实机确认 SDK 位置单位之前，不应把默认值视为已标定参数。
+`--orientation-scale` 单独缩放手柄旋转，默认 `0.3`，用于减小腕部 joint4/joint6
+的快速重分配。运行日志中的 `controller_delta_raw_units` 是从本次 Grip 锚点开始的
+累计手柄位移，`mapped_position_delta_m` 是滤波并缩放后的机器人目标位移。如果
+手柄实际移动 10 cm 时前者范数约为 `0.10`，使用 `--position-scale 1.0` 对应约
+10 cm 机器人目标位移；使用 `0.1` 只会得到约 1 cm。
 
 ## 测试
 
@@ -133,6 +144,6 @@ assets/agx_arm_urdf/piper/
 - 默认不开启关节命令发布；
 - 只有同时指定初始状态和 `--publish-joint-topic` 才建立控制发布器；
 - 不自动发布使能指令，也不控制夹爪；
-- 发布端带有限状态、订阅者、单步和变化率检查；
+- 发布端带有限状态、订阅者、IK 硬跳变检查，以及速度/加速度轨迹限制；
 - 不包含 MoveIt 集成；
 - 真实 Quest 3 数据单位、坐标约定和完整流水线仍需在目标设备上验收。

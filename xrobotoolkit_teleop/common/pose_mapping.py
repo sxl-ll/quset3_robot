@@ -34,6 +34,8 @@ class PoseMappingResult:
     clutch_active: bool
     target_updated: bool
     reason: str
+    controller_delta_raw_units: tuple[float, float, float] | None = None
+    mapped_position_delta_m: tuple[float, float, float] | None = None
 
 
 class RelativePoseMapper:
@@ -51,6 +53,7 @@ class RelativePoseMapper:
         initial_target_pose: CartesianPose,
         xr_to_robot_rotation: np.ndarray = DEFAULT_XR_TO_ROBOT_ROTATION,
         position_scale: float = 1.0,
+        orientation_scale: float = 1.0,
         smoothing_alpha: float = 0.25,
         grip_threshold: float = 0.9,
         quaternion_norm_tolerance: float = 1e-2,
@@ -64,6 +67,8 @@ class RelativePoseMapper:
             raise ValueError("xr_to_robot_rotation must be a proper rotation with determinant +1")
         if not np.isfinite(position_scale) or position_scale <= 0:
             raise ValueError("position_scale must be a finite positive number")
+        if not np.isfinite(orientation_scale) or not 0 <= orientation_scale <= 1:
+            raise ValueError("orientation_scale must be in [0, 1]")
         if not np.isfinite(smoothing_alpha) or not 0 < smoothing_alpha <= 1:
             raise ValueError("smoothing_alpha must be in (0, 1]")
         if not np.isfinite(grip_threshold) or not 0 <= grip_threshold <= 1:
@@ -73,6 +78,7 @@ class RelativePoseMapper:
 
         self.xr_to_robot_rotation = rotation.copy()
         self.position_scale = float(position_scale)
+        self.orientation_scale = float(orientation_scale)
         self.smoothing_alpha = float(smoothing_alpha)
         self.grip_threshold = float(grip_threshold)
         self.quaternion_norm_tolerance = float(quaternion_norm_tolerance)
@@ -199,7 +205,15 @@ class RelativePoseMapper:
             self._reference_controller_quaternion_wxyz = controller_quaternion_wxyz.copy()
             self._filtered_controller_position = controller_position.copy()
             self._filtered_controller_quaternion_wxyz = controller_quaternion_wxyz.copy()
-            return PoseMappingResult(self.target_pose, True, False, "clutch_anchored")
+            zero_delta = (0.0, 0.0, 0.0)
+            return PoseMappingResult(
+                self.target_pose,
+                True,
+                False,
+                "clutch_anchored",
+                controller_delta_raw_units=zero_delta,
+                mapped_position_delta_m=zero_delta,
+            )
 
         assert self._reference_target_position is not None
         assert self._reference_target_quaternion_wxyz is not None
@@ -217,13 +231,16 @@ class RelativePoseMapper:
             alpha,
         )
 
-        delta_position = (
+        controller_delta = controller_position - self._reference_controller_position
+        filtered_controller_delta = (
             self._filtered_controller_position - self._reference_controller_position
-        ) * self.position_scale
+        )
+        delta_position = filtered_controller_delta * self.position_scale
         delta_rotation = quat_diff_as_angle_axis(
             self._reference_controller_quaternion_wxyz,
             self._filtered_controller_quaternion_wxyz,
         )
+        delta_rotation *= self.orientation_scale
         target_position, target_quaternion_wxyz = apply_delta_pose(
             self._reference_target_position,
             self._reference_target_quaternion_wxyz,
@@ -233,5 +250,12 @@ class RelativePoseMapper:
         target_quaternion_wxyz /= np.linalg.norm(target_quaternion_wxyz)
         self._target_position = target_position
         self._target_quaternion_wxyz = target_quaternion_wxyz
-        return PoseMappingResult(self.target_pose, True, True, "target_updated")
+        return PoseMappingResult(
+            self.target_pose,
+            True,
+            True,
+            "target_updated",
+            controller_delta_raw_units=tuple(float(value) for value in controller_delta),
+            mapped_position_delta_m=tuple(float(value) for value in delta_position),
+        )
 

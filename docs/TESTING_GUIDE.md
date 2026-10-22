@@ -121,7 +121,7 @@ python -m unittest discover -v
 python -m unittest tests.test_quest3_reader -v
 ```
 
-当前基线为 44 个测试全部通过。Quest 3 Reader 的 6 个测试验证：
+当前基线为 52 个测试全部通过。Quest 3 Reader 的 6 个测试验证：
 
 - 完整快照读取；
 - 时间戳更新和数据陈旧检测；
@@ -454,23 +454,32 @@ python -m xrobotoolkit_teleop.cli.quest3_piper_ik \
   --command-subscriber-timeout-s 5 \
   --max-command-joint-step-rad 0.05 \
   --max-command-joint-speed-rad-s 0.5 \
-  --rate-hz 20 \
-  --position-scale 0.1
+  --max-command-joint-acceleration-rad-s2 2.0 \
+  --driver-speed-percent 20 \
+  --rate-hz 50 \
+  --position-scale 1.0 \
+  --orientation-scale 0.3
 ```
 
 `--publish-joint-topic` 是刻意设置的显式开关。程序启动时先读取当前六轴角度和
 `joint6` 夹爪位置；发布时写入 `joint0…joint5` 的有效 IK 结果并原样保持夹爪。
-只有新目标通过 IK、FK 误差和 URDF 限位检查才会发布。以下情况会停发或拒绝：
+只有新目标通过 IK、FK 误差和 URDF 限位检查才会发布。IK 目标先经过关节速度和
+加速度限制，必要时以 `trajectory=RATE_LIMITED` 发布中间点，而不是因普通速度
+超限退出。以下情况会停发或拒绝：
 
 - 右手柄跟踪或时间戳无效；
 - Grip 未激活或刚刚建立 clutch 锚点；
 - IK 失败或关节限位无效；
-- 相邻命令超过配置的单步限制或变化率限制（程序立即退出，需重新读取状态）；
+- 相邻 IK 目标超过硬单步限制（程序立即退出，需重新读取状态）；
 - `/joint_right_states` 的订阅者消失。
 
-程序不会写 `/enable_flag`，不会替操作者使能机械臂。上述单步和变化率仅是应用层
-附加保护，不替代驱动器中的速度、加速度、碰撞、通信看门狗和急停保护。初次联调应
-保持低 `--position-scale`，从极小手柄位移开始，并由操作者随时准备急停。
+程序不会写 `/enable_flag`，不会替操作者使能机械臂。上述单步、速度和加速度限制
+仅是应用层附加保护，不替代驱动器中的速度、加速度、碰撞、通信看门狗和急停保护。
+`controller_delta_raw_units` 显示 Grip 锚点以来的累计手柄位移；若实际移动 10 cm
+时其范数约为 `0.10`，`--position-scale 1.0` 表示约 1:1 平移，`0.1` 则只映射为
+约 1 cm。`--driver-speed-percent 20` 按 Piper 驱动约定写入
+`JointState.velocity[6]`，避免全零 velocity 被驱动解释为 100% 速度。初次联调
+仍应从极小手柄位移开始，并由操作者随时准备急停。
 
 ## 11. 每次测试的记录模板
 

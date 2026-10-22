@@ -71,6 +71,7 @@ class FakeIKSolver:
         self._pose = CartesianPose((0.4, 0.0, 0.3), (0.0, 0.0, 0.0, 1.0))
         self.calls = []
         self.should_succeed = True
+        self.commanded_joint_angles = np.zeros(6)
 
     @property
     def end_effector_pose(self):
@@ -92,6 +93,13 @@ class FakeIKSolver:
             orientation_error_rad=0.0,
             iterations=1,
             message="test result",
+        )
+
+    def set_joint_angles(self, joint_angles_rad):
+        self.commanded_joint_angles = np.asarray(joint_angles_rad, dtype=np.float64)
+        self._pose = CartesianPose(
+            (0.4 + float(self.commanded_joint_angles[0]), 0.0, 0.3),
+            (0.0, 0.0, 0.0, 1.0),
         )
 
 
@@ -139,6 +147,18 @@ class Quest3PiperPipelineTest(unittest.TestCase):
         self.assertEqual(result.mapping.reason, "tracking_invalid")
         self.assertIsNone(result.ik)
         self.assertEqual(self.ik.calls, [])
+
+    def test_command_synchronization_updates_solver_and_held_mapping_target(self):
+        commanded = (0.02, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+        commanded_pose = self.pipeline.synchronize_commanded_joint_angles(
+            commanded,
+            hold_mapping_target=True,
+        )
+
+        np.testing.assert_allclose(self.ik.commanded_joint_angles, commanded)
+        np.testing.assert_allclose(commanded_pose.position, (0.42, 0.0, 0.3))
+        self.assertEqual(self.mapper.target_pose, commanded_pose)
 
     def test_invalid_left_controller_does_not_block_right_controller_teleop(self):
         self.pipeline.process(

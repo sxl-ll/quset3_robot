@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rate-hz",
         type=float,
-        default=20.0,
+        default=50.0,
         help="Console sampling rate (default: 20 Hz).",
     )
     parser.add_argument(

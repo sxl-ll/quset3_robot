@@ -37,6 +37,14 @@ class Quest3PiperIKCliTest(unittest.TestCase):
             ]
         )
 
+    def test_rejects_invalid_orientation_scale_and_command_acceleration(self):
+        with self.assertRaises(SystemExit):
+            self._validate(["--orientation-scale", "1.1"])
+        with self.assertRaises(SystemExit):
+            self._validate(["--max-command-joint-acceleration-rad-s2", "0"])
+        with self.assertRaises(SystemExit):
+            self._validate(["--driver-speed-percent", "101"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,8 @@ class RelativePoseMapperTest(unittest.TestCase):
         result = mapper.update(xr_pose((0.1, -0.2, 0.3)), grip_value=1.0, tracking_valid=True)
 
         np.testing.assert_allclose(result.target_pose.position, [0.65, -0.6, 1.05])
+        np.testing.assert_allclose(result.controller_delta_raw_units, [0.1, -0.2, 0.3])
+        np.testing.assert_allclose(result.mapped_position_delta_m, [0.25, -0.5, 0.75])
 
     def test_configured_axis_rotation_maps_translation(self):
         rotation = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
@@ -69,6 +71,31 @@ class RelativePoseMapperTest(unittest.TestCase):
         np.testing.assert_allclose(
             result.target_pose.orientation_xyzw,
             controller_quaternion,
+            atol=1e-7,
+        )
+
+    def test_orientation_scale_reduces_controller_rotation(self):
+        mapper = self.make_mapper(orientation_scale=0.25)
+        mapper.update(xr_pose(), grip_value=1.0, tracking_valid=True)
+        half_angle = math.pi / 4.0
+
+        result = mapper.update(
+            xr_pose(
+                quaternion_xyzw=(
+                    0.0,
+                    0.0,
+                    math.sin(half_angle),
+                    math.cos(half_angle),
+                )
+            ),
+            grip_value=1.0,
+            tracking_valid=True,
+        )
+
+        expected_half_angle = math.pi / 16.0
+        np.testing.assert_allclose(
+            result.target_pose.orientation_xyzw,
+            (0.0, 0.0, math.sin(expected_half_angle), math.cos(expected_half_angle)),
             atol=1e-7,
         )
 

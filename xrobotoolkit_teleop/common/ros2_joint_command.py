@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
 import numpy as np
@@ -20,25 +21,52 @@ class JointCommandRejected(RuntimeError):
     """Raised when a joint command fails a local safety check."""
 
 
+@dataclass(frozen=True)
+class JointCommandPlan:
+    """One acceleration- and velocity-limited command toward an IK target."""
+
+    desired_joint_angles_rad: tuple[float, ...]
+    command_joint_angles_rad: tuple[float, ...]
+    command_velocity_rad_s: tuple[float, ...]
+    elapsed_s: float
+    rate_limited: bool
+    largest_tracking_error_rad: float
+    command_monotonic_s: float
+
+
 class JointCommandLimiter:
-    """Reject non-finite commands, large steps, and excessive command velocity."""
+    """Reject IK jumps and smoothly approach accepted targets."""
 
     def __init__(
         self,
         initial_joint_angles_rad: Sequence[float],
         max_joint_step_rad: float,
         max_joint_speed_rad_s: float,
+        max_joint_acceleration_rad_s2: float,
         monotonic: Callable[[], float] = time.monotonic,
+        max_timestep_s: float = 0.1,
     ):
         if not math.isfinite(max_joint_step_rad) or max_joint_step_rad <= 0:
             raise ValueError("max_joint_step_rad must be positive")
         if not math.isfinite(max_joint_speed_rad_s) or max_joint_speed_rad_s <= 0:
             raise ValueError("max_joint_speed_rad_s must be positive")
+        if (
+            not math.isfinite(max_joint_acceleration_rad_s2)
+            or max_joint_acceleration_rad_s2 <= 0
+        ):
+            raise ValueError("max_joint_acceleration_rad_s2 must be positive")
+        if not math.isfinite(max_timestep_s) or max_timestep_s <= 0:
+            raise ValueError("max_timestep_s must be positive")
 
         self.max_joint_step_rad = float(max_joint_step_rad)
         self.max_joint_speed_rad_s = float(max_joint_speed_rad_s)
+        self.max_joint_acceleration_rad_s2 = float(max_joint_acceleration_rad_s2)
+        self.max_timestep_s = float(max_timestep_s)
         self._monotonic = monotonic
-        self._last_joint_angles_rad = self._parse_angles(initial_joint_angles_rad)
+        initial_angles = self._parse_angles(initial_joint_angles_rad)
+        self._last_desired_joint_angles_rad = initial_angles.copy()
+        self._last_command_joint_angles_rad = initial_angles.copy()
+        self._last_command_velocity_rad_s = np.zeros(6, dtype=np.float64)
         self._last_command_monotonic_s = self._monotonic()
 
     @staticmethod
@@ -51,29 +79,82 @@ class JointCommandLimiter:
             raise JointCommandRejected("joint command must contain six finite radians values")
         return angles
 
-    def check(self, joint_angles_rad: Sequence[float]) -> tuple[np.ndarray, float]:
-        angles = self._parse_angles(joint_angles_rad)
+    def check(self, joint_angles_rad: Sequence[float]) -> JointCommandPlan:
+        desired_angles = self._parse_angles(joint_angles_rad)
         now_s = self._monotonic()
-        elapsed_s = max(0.0, now_s - self._last_command_monotonic_s)
-        delta = np.abs(angles - self._last_joint_angles_rad)
-        largest_step = float(np.max(delta))
+        elapsed_s = min(
+            max(0.0, now_s - self._last_command_monotonic_s),
+            self.max_timestep_s,
+        )
+
+        desired_delta = np.abs(desired_angles - self._last_desired_joint_angles_rad)
+        largest_step = float(np.max(desired_delta))
         if largest_step > self.max_joint_step_rad:
             raise JointCommandRejected(
-                f"largest joint step {largest_step:.6f} rad exceeds "
+                f"largest IK target step {largest_step:.6f} rad exceeds "
                 f"limit {self.max_joint_step_rad:.6f} rad"
             )
 
-        speed_limit_step = self.max_joint_speed_rad_s * elapsed_s
-        if largest_step > speed_limit_step:
-            raise JointCommandRejected(
-                f"largest joint step {largest_step:.6f} rad over {elapsed_s:.6f}s exceeds "
-                f"speed limit {self.max_joint_speed_rad_s:.6f} rad/s"
+        tracking_error = desired_angles - self._last_command_joint_angles_rad
+        if elapsed_s <= 0.0:
+            command_velocity = np.zeros(6, dtype=np.float64)
+            command_angles = self._last_command_joint_angles_rad.copy()
+        else:
+            braking_speed = np.sqrt(
+                2.0 * self.max_joint_acceleration_rad_s2 * np.abs(tracking_error)
             )
-        return angles, now_s
+            target_speed = np.minimum(self.max_joint_speed_rad_s, braking_speed)
+            target_velocity = np.sign(tracking_error) * target_speed
+            maximum_velocity_change = self.max_joint_acceleration_rad_s2 * elapsed_s
+            command_velocity = np.clip(
+                target_velocity,
+                self._last_command_velocity_rad_s - maximum_velocity_change,
+                self._last_command_velocity_rad_s + maximum_velocity_change,
+            )
 
-    def accept(self, joint_angles_rad: np.ndarray, command_monotonic_s: float) -> None:
-        self._last_joint_angles_rad = np.asarray(joint_angles_rad, dtype=np.float64).copy()
-        self._last_command_monotonic_s = float(command_monotonic_s)
+            # A target reversal must not make the arm continue away from the new target.
+            command_velocity[command_velocity * tracking_error <= 0.0] = 0.0
+            command_delta = command_velocity * elapsed_s
+            reached_target = np.abs(command_delta) >= np.abs(tracking_error)
+            command_delta[reached_target] = tracking_error[reached_target]
+            command_velocity[reached_target] = 0.0
+            command_angles = self._last_command_joint_angles_rad + command_delta
+
+        rate_limited = not np.allclose(command_angles, desired_angles, rtol=0.0, atol=1e-12)
+        return JointCommandPlan(
+            desired_joint_angles_rad=tuple(float(value) for value in desired_angles),
+            command_joint_angles_rad=tuple(float(value) for value in command_angles),
+            command_velocity_rad_s=tuple(float(value) for value in command_velocity),
+            elapsed_s=elapsed_s,
+            rate_limited=rate_limited,
+            largest_tracking_error_rad=float(np.max(np.abs(tracking_error))),
+            command_monotonic_s=now_s,
+        )
+
+    def accept(self, plan: JointCommandPlan) -> None:
+        self._last_desired_joint_angles_rad = np.asarray(
+            plan.desired_joint_angles_rad,
+            dtype=np.float64,
+        )
+        self._last_command_joint_angles_rad = np.asarray(
+            plan.command_joint_angles_rad,
+            dtype=np.float64,
+        )
+        self._last_command_velocity_rad_s = np.asarray(
+            plan.command_velocity_rad_s,
+            dtype=np.float64,
+        )
+        self._last_command_monotonic_s = float(plan.command_monotonic_s)
+
+    def hold(self) -> None:
+        """Stop trajectory progress and make the last command the next target origin."""
+        self._last_desired_joint_angles_rad = self._last_command_joint_angles_rad.copy()
+        self._last_command_velocity_rad_s = np.zeros(6, dtype=np.float64)
+        self._last_command_monotonic_s = self._monotonic()
+
+    @property
+    def last_command_joint_angles_rad(self) -> tuple[float, ...]:
+        return tuple(float(value) for value in self._last_command_joint_angles_rad)
 
 
 class Ros2JointCommandPublisher:
@@ -86,6 +167,8 @@ class Ros2JointCommandPublisher:
         gripper_position_m: float,
         max_joint_step_rad: float,
         max_joint_speed_rad_s: float,
+        max_joint_acceleration_rad_s2: float,
+        driver_speed_percent: float = 20.0,
         subscriber_timeout_s: float = 5.0,
     ):
         if not topic.startswith("/"):
@@ -94,6 +177,11 @@ class Ros2JointCommandPublisher:
             raise ValueError("gripper_position_m must be finite")
         if not math.isfinite(subscriber_timeout_s) or subscriber_timeout_s <= 0:
             raise ValueError("ROS 2 command subscriber timeout must be positive")
+        if (
+            not math.isfinite(driver_speed_percent)
+            or not 1 <= driver_speed_percent <= 100
+        ):
+            raise ValueError("driver_speed_percent must be within [1, 100]")
 
         try:
             import rclpy
@@ -108,6 +196,7 @@ class Ros2JointCommandPublisher:
 
         self.topic = topic
         self.gripper_position_m = float(gripper_position_m)
+        self.driver_speed_percent = float(driver_speed_percent)
         self._rclpy = rclpy
         self._joint_state_type = JointState
         self._context = rclpy.Context()
@@ -119,6 +208,7 @@ class Ros2JointCommandPublisher:
             initial_joint_angles_rad=initial_joint_angles_rad,
             max_joint_step_rad=max_joint_step_rad,
             max_joint_speed_rad_s=max_joint_speed_rad_s,
+            max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
         )
 
         try:
@@ -152,18 +242,18 @@ class Ros2JointCommandPublisher:
                 f"Failed to initialize ROS 2 publisher for {topic}: {exc}"
             ) from exc
 
-    def publish(self, joint_angles_rad: Sequence[float]) -> None:
+    def publish(self, joint_angles_rad: Sequence[float]) -> JointCommandPlan:
         if self._closed or self._node is None or self._publisher is None:
             raise Ros2JointCommandError("ROS 2 joint command publisher is closed")
         if self._publisher.get_subscription_count() < 1:
             raise Ros2JointCommandError(f"Command subscriber disappeared from {self.topic}")
 
-        angles, command_time_s = self._limiter.check(joint_angles_rad)
+        plan = self._limiter.check(joint_angles_rad)
         message = self._joint_state_type()
         message.header.stamp = self._node.get_clock().now().to_msg()
         message.name = list(PIPER_COMMAND_JOINT_NAMES)
-        message.position = [float(value) for value in angles] + [self.gripper_position_m]
-        message.velocity = [0.0] * len(PIPER_COMMAND_JOINT_NAMES)
+        message.position = list(plan.command_joint_angles_rad) + [self.gripper_position_m]
+        message.velocity = [0.0] * 6 + [self.driver_speed_percent]
         message.effort = [0.0] * len(PIPER_COMMAND_JOINT_NAMES)
         try:
             self._publisher.publish(message)
@@ -171,7 +261,15 @@ class Ros2JointCommandPublisher:
             raise Ros2JointCommandError(
                 f"Failed to publish joint command on {self.topic}: {exc}"
             ) from exc
-        self._limiter.accept(angles, command_time_s)
+        self._limiter.accept(plan)
+        return plan
+
+    @property
+    def last_command_joint_angles_rad(self) -> tuple[float, ...]:
+        return self._limiter.last_command_joint_angles_rad
+
+    def hold(self) -> None:
+        self._limiter.hold()
 
     def close(self) -> None:
         if self._closed:

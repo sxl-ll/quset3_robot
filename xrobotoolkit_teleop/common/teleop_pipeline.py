@@ -22,6 +22,8 @@ class IKSolver(Protocol):
 
     def solve(self, target_pose: CartesianPose) -> IKResult: ...
 
+    def set_joint_angles(self, joint_angles_rad: np.ndarray) -> None: ...
+
 
 @dataclass(frozen=True)
 class PipelineResult:
@@ -47,6 +49,7 @@ class Quest3PiperPipeline:
     def create(
         cls,
         position_scale: float = 1.0,
+        orientation_scale: float = 1.0,
         smoothing_alpha: float = 0.25,
         grip_threshold: float = 0.9,
         initial_joint_angles_rad: np.ndarray | None = None,
@@ -59,6 +62,7 @@ class Quest3PiperPipeline:
         mapper = RelativePoseMapper(
             initial_target_pose=ik_solver.initial_target_pose,
             position_scale=position_scale,
+            orientation_scale=orientation_scale,
             smoothing_alpha=smoothing_alpha,
             grip_threshold=grip_threshold,
         )
@@ -91,6 +95,21 @@ class Quest3PiperPipeline:
             ik=ik_result,
         )
 
+    def synchronize_commanded_joint_angles(
+        self,
+        joint_angles_rad: tuple[float, ...],
+        *,
+        hold_mapping_target: bool,
+    ) -> CartesianPose:
+        """Keep IK state aligned with the last command actually sent to the robot."""
+        angles = np.asarray(joint_angles_rad, dtype=np.float64)
+        self.ik_solver.set_joint_angles(angles)
+        commanded_pose = self.ik_solver.end_effector_pose
+        self._last_valid_target = commanded_pose
+        if hold_mapping_target:
+            self.mapper.hold_target(commanded_pose)
+        return commanded_pose
+
 
 def format_pipeline_result(result: PipelineResult) -> str:
     """Format one pipeline result with target, IK validity, and joint angles."""
@@ -106,9 +125,28 @@ def format_pipeline_result(result: PipelineResult) -> str:
             f"right_grip={result.grip_value:.3f} mapping={result.mapping.reason}"
         ),
         f"  right_controller.raw=({right_controller_raw})",
-        f"  target_position=({position})",
-        f"  target_orientation_xyzw=({orientation})",
     ]
+    if result.mapping.controller_delta_raw_units is not None:
+        controller_delta = result.mapping.controller_delta_raw_units
+        mapped_delta = result.mapping.mapped_position_delta_m
+        controller_delta_values = ", ".join(
+            f"{value:+.6f}" for value in controller_delta
+        )
+        mapped_delta_values = ", ".join(f"{value:+.6f}" for value in mapped_delta)
+        lines.extend(
+            (
+                f"  controller_delta_raw_units=({controller_delta_values}) "
+                f"norm={np.linalg.norm(controller_delta):.6f}",
+                f"  mapped_position_delta_m=({mapped_delta_values}) "
+                f"norm={np.linalg.norm(mapped_delta):.6f}",
+            )
+        )
+    lines.extend(
+        (
+            f"  target_position=({position})",
+            f"  target_orientation_xyzw=({orientation})",
+        )
+    )
     if result.ik is None:
         lines.append("  ik_status=NOT_RUN")
         return "\n".join(lines)
