@@ -26,6 +26,7 @@ dev = [
 
 [project.scripts]
 quest3-monitor = "xrobotoolkit_teleop.cli.quest3_monitor:main"
+quest3-piper-ik = "xrobotoolkit_teleop.cli.quest3_piper_ik:main"
 
 [tool.setuptools.packages.find]
 include = ["xrobotoolkit_teleop*"]

@@ -62,6 +62,7 @@ class Quest3Snapshot:
     timestamp_advanced: bool
     timestamp_age_s: float
     stale: bool
+    timestamp_valid: bool
     tracking_valid: bool
     poses: Mapping[str, PoseSample]
     analog_inputs: Mapping[str, float]
@@ -208,10 +209,9 @@ class Quest3Reader:
         if timestamp_issue:
             issues.append(timestamp_issue)
 
+        timestamp_valid = timestamp_ns > 0 and not stale and timestamp_issue is None
         tracking_valid = (
-            timestamp_ns > 0
-            and not stale
-            and timestamp_issue is None
+            timestamp_valid
             and all(sample.valid for sample in poses.values())
             and all(math.isfinite(value) for value in analog_inputs.values())
             and left_axis_issue is None
@@ -224,6 +224,7 @@ class Quest3Reader:
             timestamp_advanced=timestamp_advanced,
             timestamp_age_s=timestamp_age_s,
             stale=stale,
+            timestamp_valid=timestamp_valid,
             tracking_valid=tracking_valid,
             poses=poses,
             analog_inputs=analog_inputs,

@@ -126,6 +126,7 @@ class Quest3ReaderTest(unittest.TestCase):
         snapshot = self.reader.read()
 
         self.assertTrue(snapshot.tracking_valid)
+        self.assertTrue(snapshot.timestamp_valid)
         self.assertTrue(snapshot.timestamp_advanced)
         self.assertEqual(snapshot.timestamp_ns, 1_000_000_000)
         self.assertEqual(snapshot.poses["headset"].position, (0.0, 1.6, 0.0))
@@ -146,6 +147,7 @@ class Quest3ReaderTest(unittest.TestCase):
         self.clock.now_ns = 800_000_001
         stale = self.reader.read()
         self.assertFalse(stale.tracking_valid)
+        self.assertFalse(stale.timestamp_valid)
         self.assertTrue(stale.stale)
         self.assertIn("has not advanced", " ".join(stale.issues))
 
@@ -157,6 +159,7 @@ class Quest3ReaderTest(unittest.TestCase):
         snapshot = self.reader.read()
 
         self.assertFalse(snapshot.tracking_valid)
+        self.assertFalse(snapshot.timestamp_valid)
         self.assertTrue(snapshot.stale)
         self.assertTrue(all(not pose.valid for pose in snapshot.poses.values()))
         self.assertIn("no active tracking data", " ".join(snapshot.issues))
